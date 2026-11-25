@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: queue
+      POSTGRES_PASSWORD: queue
+      POSTGRES_DB: queue
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queue -d queue"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  prediction:
+    build: ./prediction-service
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    # Pinned to a single worker: the WebSocket broadcaster is in-process, so
+    # a second worker process would hold a disjoint set of connections and
+    # some clients would silently stop receiving updates. See backend README.
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m app.seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://queue:queue@db:5432/queue
+      PREDICTION_SERVICE_URL: http://prediction:8001
+      # Host-mapped frontend port is 5174 (not 5173) -- see frontend.ports below.
+      CORS_ORIGINS: '["http://localhost:5174"]'
+      PUBLIC_QUEUE_URL: http://localhost:5174/display
+      SMS_PROVIDER: console
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin123}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      prediction:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_WS_URL: ws://localhost:8000/ws/queue
+    # Host port 5174 (container still listens on 5173 internally) -- 5173 is
+    # commonly already taken by another local Vite project.
+    ports:
+      - "5174:5173"
+    depends_on:
+      - backend
+
+volumes:
+  db_data:
